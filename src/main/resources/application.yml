@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: graph-demo
+
+  ai:
+    dashscope:
+      api-key: ${QWEN_APP_KEY}
+      chat:
+        options:
+          model: qwen-plus-2025-07-28
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    openai:
+      api-key: ${DEEPSEEK_APP_KEY}
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-chat

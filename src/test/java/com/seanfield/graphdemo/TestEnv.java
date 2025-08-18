@@ -1,4 +1,4 @@
-package com.seanfield.graphdemo.config;
+package com.seanfield.graphdemo;
 
 public class TestEnv {
     public static void main(String[] args) {
