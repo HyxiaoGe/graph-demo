@@ -6,6 +6,9 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * 验证节点：检查查询内容是否符合要求
+ */
 public class ValidationNode implements NodeAction {
 
 	private final int minQueryLength;
@@ -25,7 +28,7 @@ public class ValidationNode implements NodeAction {
 		String query = queryObj == null ? "" : String.valueOf(queryObj).trim();
 
 		boolean ok = query.length() >= this.minQueryLength;
-		String reason = ok ? "" : "query is blank or too short";
+		String reason = ok ? "" : "查询内容为空或过短";
 
 		HashMap<String, Object> validation = new HashMap<>();
 		validation.put("ok", ok);

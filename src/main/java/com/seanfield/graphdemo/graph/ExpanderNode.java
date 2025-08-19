@@ -12,6 +12,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 扩展节点：使用AI生成查询的多个变体版本
+ */
 public class ExpanderNode implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(ExpanderNode.class);
@@ -37,14 +40,16 @@ public class ExpanderNode implements NodeAction {
 
     @Override
     public Map<String, Object> apply(OverAllState state) throws Exception {
-        // 1. 从 OverAllState 中获取键为 "input" 的 payload Map
+        log.info("ExpanderNode开始执行，当前状态: {}", state.data());
+        
+        // 1. 从状态中获取输入数据
         Map<String, Object> payload = state.value("input", Map.of());
 
-        // 2. 从 payload Map 中提取具体参数
+        // 2. 提取查询参数
         String query = (String) payload.getOrDefault("query", "");
         Integer expanderNumber = (Integer) payload.getOrDefault("expandernumber", this.defaultNumber);
 
-        log.info("query: {}, expanderNumber: {}", query, expanderNumber);
+        log.info("处理查询: {}, 扩展数量: {}", query, expanderNumber);
 
         Flux<String> contentStream = this.chatClient
                 .prompt()

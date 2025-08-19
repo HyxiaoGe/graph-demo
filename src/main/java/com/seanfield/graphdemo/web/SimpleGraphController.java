@@ -4,7 +4,11 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.OverAllStateFactory;
 import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
+import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.seanfield.graphdemo.graph.ExpanderNode;
+import com.seanfield.graphdemo.graph.FallbackNode;
+import com.seanfield.graphdemo.graph.ValidationEdgeAction;
+import com.seanfield.graphdemo.graph.ValidationNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -15,6 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
+import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
 import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
 
 @RestController
@@ -27,17 +32,29 @@ public class SimpleGraphController {
 
     public SimpleGraphController(ChatClient.Builder chatClientBuilder) throws GraphStateException {
         this.chatClientBuilder = chatClientBuilder;
-        log.info("Creating StateGraph with ExpanderNode...");
+        log.info("正在创建包含扩展节点的状态图...");
 
-        // 按照文档要求，创建 OverAllStateFactory
-        OverAllStateFactory stateFactory = OverAllState::new;
+        // 创建预配置所有必要键的状态工厂
+        OverAllStateFactory stateFactory = () -> {
+            OverAllState state = new OverAllState();
+            state.registerKeyAndStrategy("validation", new ReplaceStrategy());
+            state.registerKeyAndStrategy("expandercontent", new ReplaceStrategy());
+            state.registerKeyAndStrategy("error", new ReplaceStrategy());
+            return state;
+        };
 
-        // 按照文档要求，使用正确的 StateGraph 构造函数
-        this.stateGraph = new StateGraph("Query Expander Workflow", stateFactory)
+        // 创建包含条件逻辑的状态图
+        this.stateGraph = new StateGraph("条件扩展工作流", stateFactory)
+                .addNode("validation", node_async(new ValidationNode(1)))
                 .addNode("expander", node_async(new ExpanderNode(chatClientBuilder)))
-                .addEdge(StateGraph.START, "expander")
-                .addEdge("expander", StateGraph.END);
-        log.info("StateGraph created successfully");
+                .addNode("fallback", node_async(new FallbackNode()))
+                .addEdge(StateGraph.START, "validation")
+                .addConditionalEdges("validation",
+                        edge_async(new ValidationEdgeAction()),
+                        Map.of("valid", "expander", "invalid", "fallback"))
+                .addEdge("expander", StateGraph.END)
+                .addEdge("fallback", StateGraph.END);
+        log.info("状态图创建成功");
     }
 
     @GetMapping("/expand")
@@ -46,21 +63,45 @@ public class SimpleGraphController {
                                       @RequestParam(value = "threadid", defaultValue = "demo-thread") String threadId) {
 
         try {
-            log.info("Testing basic ChatClient...");
-            ExpanderNode testNode = new ExpanderNode(this.chatClientBuilder);
-
-            // 1. 创建 OverAllState，"input" 键已在构造函数中默认注册
-            OverAllState testState = new OverAllState();
-
-            // 2. 创建包含业务数据的 payload Map
+            ExpanderNode expanderNode = new ExpanderNode(this.chatClientBuilder);
+            OverAllState state = new OverAllState();
             Map<String, Object> payload = Map.of("query", query, "expandernumber", expanderNumber);
-
-            // 3. 将 payload Map 作为值，更新到 "input" 键上
-            testState.updateState(Map.of("input", payload));
-
-            return testNode.apply(testState);
+            state.updateState(Map.of("input", payload));
+            return expanderNode.apply(state);
         } catch (Exception e) {
-            log.error("Direct call failed", e);
+            log.error("直接调用失败", e);
+            String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            return Map.of("error", errorMsg);
+        }
+    }
+
+    @GetMapping("/expand-conditional")
+    public Map<String, Object> expandConditional(@RequestParam(value = "query", defaultValue = "") String query,
+                                                 @RequestParam(value = "expandernumber", defaultValue = "3") Integer expanderNumber) {
+        try {
+            // 编译现有的状态图
+            var compiledGraph = this.stateGraph.compile();
+
+            // 创建初始状态并设置输入数据
+            Map<String, Object> initialData = Map.of("input", Map.of("query", query, "expandernumber", expanderNumber));
+
+            // 执行图并返回结果
+            var result = compiledGraph.invoke(initialData);
+            return result.map(state -> {
+                Map<String, Object> data = state.data();
+                // 如果有 expandercontent，直接返回它
+                if (data.containsKey("expandercontent")) {
+                    return Map.of("expandercontent", data.get("expandercontent"));
+                }
+                // 如果有 error，返回错误信息
+                if (data.containsKey("error")) {
+                    return Map.of("error", data.get("error"), "expandercontent", data.get("expandercontent"));
+                }
+                // 其他情况返回完整数据
+                return data;
+            }).orElse(Map.of("error", "图执行失败"));
+        } catch (Exception e) {
+            log.error("条件流程执行失败", e);
             String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             return Map.of("error", errorMsg);
         }
