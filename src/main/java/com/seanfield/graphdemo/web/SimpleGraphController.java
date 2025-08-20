@@ -7,6 +7,9 @@ import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.seanfield.graphdemo.graph.ExpanderNode;
 import com.seanfield.graphdemo.graph.FallbackNode;
+import com.seanfield.graphdemo.graph.LoopConditionAction;
+import com.seanfield.graphdemo.graph.LoopProcessorNode;
+import com.seanfield.graphdemo.graph.ResultCollectorNode;
 import com.seanfield.graphdemo.graph.ValidationEdgeAction;
 import com.seanfield.graphdemo.graph.ValidationNode;
 import org.slf4j.Logger;
@@ -17,6 +20,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
@@ -28,6 +33,7 @@ public class SimpleGraphController {
 
     private static final Logger log = LoggerFactory.getLogger(SimpleGraphController.class);
     private final StateGraph stateGraph;
+    private final StateGraph loopStateGraph;
     private final ChatClient.Builder chatClientBuilder;
 
     public SimpleGraphController(ChatClient.Builder chatClientBuilder) throws GraphStateException {
@@ -55,6 +61,30 @@ public class SimpleGraphController {
                 .addEdge("expander", StateGraph.END)
                 .addEdge("fallback", StateGraph.END);
         log.info("状态图创建成功");
+
+        // 创建循环演示的状态图
+        log.info("正在创建循环处理状态图...");
+        
+        OverAllStateFactory loopStateFactory = () -> {
+            OverAllState state = new OverAllState();
+            state.registerKeyAndStrategy("items", new ReplaceStrategy());
+            state.registerKeyAndStrategy("loop_index", new ReplaceStrategy());
+            state.registerKeyAndStrategy("processed_results", new ReplaceStrategy());
+            state.registerKeyAndStrategy("loop_completed", new ReplaceStrategy());
+            state.registerKeyAndStrategy("current_processing", new ReplaceStrategy());
+            state.registerKeyAndStrategy("loop_final_result", new ReplaceStrategy());
+            return state;
+        };
+
+        this.loopStateGraph = new StateGraph("循环处理工作流", loopStateFactory)
+                .addNode("loop_processor", node_async(new LoopProcessorNode(chatClientBuilder)))
+                .addNode("result_collector", node_async(new ResultCollectorNode()))
+                .addEdge(StateGraph.START, "loop_processor")
+                .addConditionalEdges("loop_processor",
+                        edge_async(new LoopConditionAction()),
+                        Map.of("continue", "loop_processor", "finish", "result_collector"))
+                .addEdge("result_collector", StateGraph.END);
+        log.info("循环处理状态图创建成功");
     }
 
     @GetMapping("/expand")
@@ -102,6 +132,50 @@ public class SimpleGraphController {
             }).orElse(Map.of("error", "图执行失败"));
         } catch (Exception e) {
             log.error("条件流程执行失败", e);
+            String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            return Map.of("error", errorMsg);
+        }
+    }
+
+    @GetMapping("/loop-demo")
+    public Map<String, Object> loopDemo(@RequestParam(value = "items", defaultValue = "春天的花朵,夏天的海滩,秋天的落叶,冬天的雪花") String itemsParam) {
+        try {
+            // 解析输入的项目列表
+            List<String> items = Arrays.asList(itemsParam.split(","));
+            log.info("开始循环处理演示，项目列表: {}", items);
+
+            // 编译循环状态图
+            var compiledLoopGraph = this.loopStateGraph.compile();
+
+            // 创建初始状态
+            Map<String, Object> initialData = Map.of(
+                    "items", items,
+                    "loop_index", 0,
+                    "processed_results", List.of()
+            );
+
+            // 执行循环状态图
+            var result = compiledLoopGraph.invoke(initialData);
+            return result.map(state -> {
+                Map<String, Object> data = state.data();
+                // 返回最终处理结果
+                if (data.containsKey("loop_final_result")) {
+                    Object finalResult = data.get("loop_final_result");
+                    if (finalResult instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> resultMap = (Map<String, Object>) finalResult;
+                        return resultMap;
+                    }
+                }
+                // 如果没有最终结果，返回当前状态
+                return Map.of(
+                        "status", "processing",
+                        "current_data", data
+                );
+            }).orElse(Map.of("error", "循环图执行失败"));
+
+        } catch (Exception e) {
+            log.error("循环演示执行失败", e);
             String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             return Map.of("error", errorMsg);
         }
