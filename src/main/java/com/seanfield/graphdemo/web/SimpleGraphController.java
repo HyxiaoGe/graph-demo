@@ -5,13 +5,7 @@ import com.alibaba.cloud.ai.graph.OverAllStateFactory;
 import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
-import com.seanfield.graphdemo.graph.ExpanderNode;
-import com.seanfield.graphdemo.graph.FallbackNode;
-import com.seanfield.graphdemo.graph.LoopConditionAction;
-import com.seanfield.graphdemo.graph.LoopProcessorNode;
-import com.seanfield.graphdemo.graph.ResultCollectorNode;
-import com.seanfield.graphdemo.graph.ValidationEdgeAction;
-import com.seanfield.graphdemo.graph.ValidationNode;
+import com.seanfield.graphdemo.graph.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -21,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -34,6 +29,7 @@ public class SimpleGraphController {
     private static final Logger log = LoggerFactory.getLogger(SimpleGraphController.class);
     private final StateGraph stateGraph;
     private final StateGraph loopStateGraph;
+    private final StateGraph customerServiceGraph;
     private final ChatClient.Builder chatClientBuilder;
 
     public SimpleGraphController(ChatClient.Builder chatClientBuilder) throws GraphStateException {
@@ -85,6 +81,42 @@ public class SimpleGraphController {
                         Map.of("continue", "loop_processor", "finish", "result_collector"))
                 .addEdge("result_collector", StateGraph.END);
         log.info("循环处理状态图创建成功");
+
+        // 创建智能客服工作流状态图
+        log.info("正在创建智能客服工作流状态图...");
+        
+        OverAllStateFactory customerServiceStateFactory = () -> {
+            OverAllState state = new OverAllState();
+            state.registerKeyAndStrategy("input", new ReplaceStrategy());
+            state.registerKeyAndStrategy("intent_analysis", new ReplaceStrategy());
+            state.registerKeyAndStrategy("knowledge_search", new ReplaceStrategy());
+            state.registerKeyAndStrategy("ai_analysis", new ReplaceStrategy());
+            state.registerKeyAndStrategy("generated_answer", new ReplaceStrategy());
+            state.registerKeyAndStrategy("quality_assessment", new ReplaceStrategy());
+            state.registerKeyAndStrategy("human_service", new ReplaceStrategy());
+            state.registerKeyAndStrategy("retry_count", new ReplaceStrategy());
+            return state;
+        };
+
+        this.customerServiceGraph = new StateGraph("智能客服工作流", customerServiceStateFactory)
+                .addNode("intent_recognition", node_async(new IntentRecognitionNode(chatClientBuilder)))
+                .addNode("knowledge_search", node_async(new KnowledgeSearchNode()))
+                .addNode("ai_analysis", node_async(new AIAnalysisNode(chatClientBuilder)))
+                .addNode("human_service", node_async(new HumanServiceNode()))
+                .addNode("answer_generation", node_async(new AnswerGenerationNode()))
+                .addNode("quality_assessment", node_async(new QualityAssessmentNode(chatClientBuilder)))
+                .addEdge(StateGraph.START, "intent_recognition")
+                .addConditionalEdges("intent_recognition",
+                        edge_async(new IntentRoutingAction()),
+                        Map.of("faq", "knowledge_search", "complex", "ai_analysis", "complaint", "human_service"))
+                .addEdge("knowledge_search", "answer_generation")
+                .addEdge("ai_analysis", "answer_generation")
+                .addEdge("answer_generation", "quality_assessment")
+                .addConditionalEdges("quality_assessment",
+                        edge_async(new QualityCheckAction()),
+                        Map.of("pass", StateGraph.END, "retry", "ai_analysis"))
+                .addEdge("human_service", StateGraph.END);
+        log.info("智能客服工作流状态图创建成功");
     }
 
     @GetMapping("/expand")
@@ -178,6 +210,69 @@ public class SimpleGraphController {
             log.error("循环演示执行失败", e);
             String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             return Map.of("error", errorMsg);
+        }
+    }
+
+    @GetMapping("/customer-service")
+    public Map<String, Object> customerService(@RequestParam(value = "question", defaultValue = "请问你们的产品有哪些功能？") String question) {
+        try {
+            log.info("开始智能客服处理，用户问题: {}", question);
+
+            // 编译客服状态图
+            var compiledCustomerServiceGraph = this.customerServiceGraph.compile();
+
+            // 创建初始状态
+            Map<String, Object> initialData = Map.of(
+                    "input", Map.of("question", question),
+                    "retry_count", 0
+            );
+
+            // 执行客服状态图
+            var result = compiledCustomerServiceGraph.invoke(initialData);
+            return result.map(state -> {
+                Map<String, Object> data = state.data();
+                
+                // 构建返回结果
+                Map<String, Object> response = new HashMap<>();
+                
+                // 获取最终答案
+                if (data.containsKey("generated_answer")) {
+                    Object generatedAnswer = data.get("generated_answer");
+                    if (generatedAnswer instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> answerMap = (Map<String, Object>) generatedAnswer;
+                        response.put("answer", answerMap.get("final_answer"));
+                        response.put("answer_source", answerMap.get("answer_source"));
+                        response.put("intent_type", answerMap.get("intent_type"));
+                    }
+                }
+                
+                // 获取意图分析结果
+                if (data.containsKey("intent_analysis")) {
+                    response.put("intent_analysis", data.get("intent_analysis"));
+                }
+                
+                // 获取质量评估结果
+                if (data.containsKey("quality_assessment")) {
+                    response.put("quality_assessment", data.get("quality_assessment"));
+                }
+                
+                // 获取人工客服信息
+                if (data.containsKey("human_service")) {
+                    response.put("human_service", data.get("human_service"));
+                }
+                
+                response.put("status", "success");
+                response.put("processing_time", System.currentTimeMillis());
+                
+                return response;
+                
+            }).orElse(Map.of("error", "客服工作流执行失败", "status", "failed"));
+
+        } catch (Exception e) {
+            log.error("智能客服处理失败", e);
+            String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            return Map.of("error", errorMsg, "status", "failed");
         }
     }
 }
